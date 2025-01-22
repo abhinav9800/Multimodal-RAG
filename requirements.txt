@@ -1,0 +1,13 @@
+streamlit
+langchain-community
+langchain-chroma
+langchainhub
+langchain-google-genai
+
+unstructured[all-docs]
+pydantic 
+lxml
+
+
+
+# -e .
