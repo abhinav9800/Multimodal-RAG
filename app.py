@@ -1,3 +1,4 @@
+%%writefile app2.py
 import streamlit as st
 import os
 import base64
@@ -11,11 +12,17 @@ from google.colab import userdata
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-GOOGLE_API_KEY = "AIzaSyBNPLLvNSYUTMpx4r8y9PX9g7IHInyZ5mA"
-    
 
+import streamlit as st
+import os
+
+# Access the API key from Streamlit secrets
+GOOGLE_API_KEY = "AIzaSyAzWdDHFDjZiZ19a3oSLT8Forl5Rq8O48g"
+
+# Set the API key as an environment variable
 os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
+# Initialize models only if API key is available
 embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001",
                                           google_api_key=GOOGLE_API_KEY)
 
@@ -109,7 +116,7 @@ def img_prompt_func(data_dict):
     }
     messages.append(text_message)
     return [HumanMessage(content=messages)]
-
+@st.cache_resource
 def extract_pdf_elements(uploaded_file) -> List:
     """Extract elements from uploaded PDF file."""
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
@@ -117,7 +124,7 @@ def extract_pdf_elements(uploaded_file) -> List:
         tmp_path = tmp_file.name
 
     temp_dir = tempfile.mkdtemp()
-    
+
     elements = partition_pdf(
         filename=tmp_path,
         strategy="hi_res",
@@ -126,7 +133,7 @@ def extract_pdf_elements(uploaded_file) -> List:
         extract_image_block_to_payload=False,
         extract_image_block_output_dir=temp_dir
     )
-    
+
     os.unlink(tmp_path)
     return elements, temp_dir
 
@@ -143,17 +150,17 @@ def categorize_elements(raw_pdf_elements):
 
 def summarize_elements(texts, tables, chat, progress_bar):
     """Summarize text and table elements with progress tracking."""
-    text_prompt = """You are an assistant tasked with summarizing text for retrieval. 
-    These summaries will be embedded and used to retrieve the raw text. 
+    text_prompt = """You are an assistant tasked with summarizing text for retrieval.
+    These summaries will be embedded and used to retrieve the raw text.
     Provide a concise, retrieval-optimized summary of the following text."""
 
-    table_prompt = """You are an assistant tasked with summarizing tables for retrieval. 
-    These summaries will be embedded and used to retrieve the raw table. 
+    table_prompt = """You are an assistant tasked with summarizing tables for retrieval.
+    These summaries will be embedded and used to retrieve the raw table.
     Provide a concise summary of the table's contents and purpose."""
 
     text_summaries = []
     table_summaries = []
-    
+
     total_elements = len(texts) + len(tables)
     processed = 0
 
@@ -182,10 +189,10 @@ def process_images(image_dir, chat, progress_bar):
     img_files = [f for f in os.listdir(image_dir) if f.endswith('.jpg')]
     img_base64_list = []
     image_summaries = []
-    
-    prompt = """You are an assistant tasked with summarizing financial statement images for retrieval. 
-    These summaries will be embedded and used to retrieve the raw image. 
-    These summaries should capture the main theme of the financial statement, emphasizing each and every topics 
+
+    prompt = """You are an assistant tasked with summarizing financial statement images for retrieval.
+    These summaries will be embedded and used to retrieve the raw image.
+    These summaries should capture the main theme of the financial statement, emphasizing each and every topics
     and categories without including specific numbers."""
 
     for i, img_file in enumerate(img_files):
@@ -194,7 +201,7 @@ def process_images(image_dir, chat, progress_bar):
             with open(img_path, "rb") as image_file:
                 base64_image = base64.b64encode(image_file.read()).decode("utf-8")
             img_base64_list.append(base64_image)
-            
+
             summary = chat.invoke(
                 [
                     HumanMessage(
@@ -214,21 +221,21 @@ def process_images(image_dir, chat, progress_bar):
             st.error(f"Error processing image {img_file}: {e}")
 
     return img_base64_list, image_summaries
-
-def create_multi_vector_retriever(vectorstore, text_summaries, texts, table_summaries, 
-                                tables, image_summaries, images, embeddings):
+@st.cache_resource
+def create_multi_vector_retriever(_vectorstore, _embeddings, text_summaries, texts, 
+                                   table_summaries, tables, image_summaries, _images):
     """Create multi-vector retriever for different content types."""
     store = InMemoryStore()
     id_key = "doc_id"
-
+    
     retriever = MultiVectorRetriever(
-        vectorstore=vectorstore,
+        vectorstore=_vectorstore,
         docstore=store,
         id_key=id_key,
-        embedding=embeddings,
+        embedding=_embeddings,
         search_kwargs={"k": 10},
     )
-
+    
     def add_documents(retriever, doc_summaries, doc_contents):
         doc_ids = [str(uuid.uuid4()) for _ in doc_contents]
         summary_docs = [
@@ -237,25 +244,27 @@ def create_multi_vector_retriever(vectorstore, text_summaries, texts, table_summ
         ]
         retriever.vectorstore.add_documents(summary_docs)
         retriever.docstore.mset(list(zip(doc_ids, doc_contents)))
-
+    
     if text_summaries:
         add_documents(retriever, text_summaries, texts)
     if table_summaries:
         add_documents(retriever, table_summaries, tables)
     if image_summaries:
-        add_documents(retriever, image_summaries, images)
-
+        add_documents(retriever, image_summaries, _images)
+    
     return retriever
+
+
 
 def main():
     st.title("PDF Chat Assistant")
-    
+
     # Initialize session state
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "retriever" not in st.session_state:
         st.session_state.retriever = None
-    
+
     with st.sidebar:
         st.title("Instructions")
         st.markdown("1. Upload a PDF file")
@@ -263,51 +272,56 @@ def main():
         st.markdown("3. Start chatting with your document")
 
     uploaded_file = st.file_uploader("Upload your PDF", type=['pdf'])
-    
+
     if uploaded_file and "processed_file" not in st.session_state:
         try:
             with st.spinner("Processing PDF..."):
                 progress = st.progress(0)
-                
+
                 st.info("Extracting PDF elements...")
                 raw_pdf_elements, image_dir = extract_pdf_elements(uploaded_file)
                 progress.progress(20)
-                
+
                 st.info("Categorizing elements...")
                 texts, tables = categorize_elements(raw_pdf_elements)
                 progress.progress(40)
-                
+
                 st.info("Summarizing content...")
                 text_summaries, table_summaries = summarize_elements(texts, tables, chat, progress)
                 progress.progress(60)
-                
+
                 st.info("Processing images...")
                 img_base64_list, image_summaries = process_images(image_dir, chat, progress)
                 progress.progress(80)
-                
+
                 st.info("Creating retriever...")
                 vectorstore = Chroma(
                     collection_name="pdf_chat",
                     embedding_function=embeddings
                 )
-                
+
                 st.session_state.retriever = create_multi_vector_retriever(
-                    vectorstore, text_summaries, texts, table_summaries,
-                    tables, image_summaries, img_base64_list, embeddings
-                )
-                
+    _vectorstore=vectorstore, 
+    _embeddings=embeddings, 
+    text_summaries=text_summaries, 
+    texts=texts, 
+    table_summaries=table_summaries, 
+    tables=tables, 
+    image_summaries=image_summaries, 
+    _images=img_base64_list
+)
                 st.session_state.processed_file = True
-                
+
                 try:
                     if os.path.exists(image_dir):
                         import shutil
                         shutil.rmtree(image_dir)
                 except Exception as e:
                     st.warning(f"Could not clean up temporary files: {e}")
-                
+
                 progress.progress(100)
                 st.success("PDF processed successfully!")
-                
+
         except Exception as e:
             st.error(f"Error processing PDF: {e}")
             st.session_state.pop("processed_file", None)
@@ -331,10 +345,10 @@ def main():
                         response = chat.invoke(messages).content
                         st.markdown(response)
                         st.session_state.messages.append({"role": "assistant", "content": response})
-            
+
             except Exception as e:
                 st.error(f"Error generating response: {e}")
-    
+
     with st.sidebar:
         if st.button("Reset Chat"):
             st.session_state.messages = []
