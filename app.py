@@ -1,4 +1,3 @@
-%%writefile app2.py
 import streamlit as st
 import os
 import base64
