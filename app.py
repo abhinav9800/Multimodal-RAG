@@ -10,20 +10,26 @@ from typing import List, Tuple
 from google.colab import userdata
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_text_splitters import CharacterTextSplitter
+from unstructured.partition.pdf import partition_pdf
+from langchain_core.messages import HumanMessage
+from langchain.retrievers.multi_vector import MultiVectorRetriever
+from langchain.storage import InMemoryStore
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+import uuid
 
 
-import streamlit as st
-import os
+GOOGLE_API_KEY = "AIzaSyCJKO3-pEFRXKnydO_vwB-laKcDpug7dYQ"  
 
-# Access the API key from Streamlit secrets
-GOOGLE_API_KEY = "AIzaSyAzWdDHFDjZiZ19a3oSLT8Forl5Rq8O48g"
 
-# Set the API key as an environment variable
 os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
-# Initialize models only if API key is available
-embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001",
-                                          google_api_key=GOOGLE_API_KEY)
+
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/embedding-001",
+    google_api_key=GOOGLE_API_KEY
+)
 
 chat = ChatGoogleGenerativeAI(
     model="models/gemini-1.5-flash",
@@ -34,17 +40,6 @@ chat = ChatGoogleGenerativeAI(
     max_retries=2
 )
 
-
-from langchain_text_splitters import CharacterTextSplitter
-from unstructured.partition.pdf import partition_pdf
-from langchain_core.messages import HumanMessage
-from langchain.retrievers.multi_vector import MultiVectorRetriever
-from langchain.storage import InMemoryStore
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-import uuid
-
-# Helper functions
 def looks_like_base64(sb):
     """Check if string looks like base64."""
     return re.match("^[A-Za-z0-9+/]+[=]{0,2}$", sb) is not None
@@ -89,8 +84,34 @@ def split_image_text_types(docs):
             texts.append(doc)
     return {"images": b64_images, "texts": texts}
 
-def img_prompt_func(data_dict):
-    """Create prompt with both images and text context."""
+def get_chat_history(messages: List[dict], k: int = 3) -> str:
+    """Extract the last k conversation turns from the chat history."""
+    recent_messages = messages[-2*k:] if len(messages) > 2*k else messages
+    formatted_history = []
+
+    for msg in recent_messages:
+        role = msg["role"].capitalize()
+        content = msg["content"]
+        formatted_history.append(f"{role}: {content}")
+
+    return "\n".join(formatted_history)
+
+def create_augmented_query(question: str, chat_history: str) -> str:
+    """Create an augmented query combining current question with chat history."""
+    messages = [
+        HumanMessage(content=f"""Chat History:
+        {chat_history}
+
+        Current Question: {question}
+
+        Generate a search query that captures the context from both the history and the current question.""")
+    ]
+
+    response = chat.invoke(messages)
+    return response.content
+
+def img_prompt_func(data_dict, chat_history: str = ""):
+    """Create prompt with images, text context, and chat history."""
     formatted_texts = "\n".join(data_dict["context"]["texts"])
     messages = []
 
@@ -107,14 +128,16 @@ def img_prompt_func(data_dict):
         "text": (
             "You are financial analyst tasking with providing insights based on data provided.\n"
             "You will be given a mixed of text, tables, and image(s) usually of charts or graphs.\n"
-            "Use this information to provide answers to the question asked by user. \n"
-            f"User-provided question: {data_dict['question']}\n\n"
+            "Use this information to provide answers to the question asked by user.\n"
+            f"Recent conversation history:\n{chat_history}\n\n"
+            f"Current question: {data_dict['question']}\n\n"
             "Text and / or tables:\n"
             f"{formatted_texts}"
         ),
     }
     messages.append(text_message)
     return [HumanMessage(content=messages)]
+
 @st.cache_resource
 def extract_pdf_elements(uploaded_file) -> List:
     """Extract elements from uploaded PDF file."""
@@ -220,13 +243,14 @@ def process_images(image_dir, chat, progress_bar):
             st.error(f"Error processing image {img_file}: {e}")
 
     return img_base64_list, image_summaries
+
 @st.cache_resource
-def create_multi_vector_retriever(_vectorstore, _embeddings, text_summaries, texts, 
-                                   table_summaries, tables, image_summaries, _images):
+def create_multi_vector_retriever(_vectorstore, _embeddings, text_summaries, texts,
+                                table_summaries, tables, image_summaries, _images):
     """Create multi-vector retriever for different content types."""
     store = InMemoryStore()
     id_key = "doc_id"
-    
+
     retriever = MultiVectorRetriever(
         vectorstore=_vectorstore,
         docstore=store,
@@ -234,7 +258,7 @@ def create_multi_vector_retriever(_vectorstore, _embeddings, text_summaries, tex
         embedding=_embeddings,
         search_kwargs={"k": 10},
     )
-    
+
     def add_documents(retriever, doc_summaries, doc_contents):
         doc_ids = [str(uuid.uuid4()) for _ in doc_contents]
         summary_docs = [
@@ -243,22 +267,20 @@ def create_multi_vector_retriever(_vectorstore, _embeddings, text_summaries, tex
         ]
         retriever.vectorstore.add_documents(summary_docs)
         retriever.docstore.mset(list(zip(doc_ids, doc_contents)))
-    
+
     if text_summaries:
         add_documents(retriever, text_summaries, texts)
     if table_summaries:
         add_documents(retriever, table_summaries, tables)
     if image_summaries:
         add_documents(retriever, image_summaries, _images)
-    
+
     return retriever
-
-
 
 def main():
     st.title("PDF Chat Assistant")
 
-    # Initialize session state
+    
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "retriever" not in st.session_state:
@@ -300,15 +322,15 @@ def main():
                 )
 
                 st.session_state.retriever = create_multi_vector_retriever(
-    _vectorstore=vectorstore, 
-    _embeddings=embeddings, 
-    text_summaries=text_summaries, 
-    texts=texts, 
-    table_summaries=table_summaries, 
-    tables=tables, 
-    image_summaries=image_summaries, 
-    _images=img_base64_list
-)
+                    _vectorstore=vectorstore,
+                    _embeddings=embeddings,
+                    text_summaries=text_summaries,
+                    texts=texts,
+                    table_summaries=table_summaries,
+                    tables=tables,
+                    image_summaries=image_summaries,
+                    _images=img_base64_list
+                )
                 st.session_state.processed_file = True
 
                 try:
@@ -338,9 +360,21 @@ def main():
             try:
                 with st.chat_message("assistant"):
                     with st.spinner("Thinking..."):
-                        docs = st.session_state.retriever.get_relevant_documents(prompt)
+                        
+                        chat_history = get_chat_history(st.session_state.messages, k=3)
+
+                       
+                        augmented_query = create_augmented_query(prompt, chat_history)
+
+                        
+                        docs = st.session_state.retriever.get_relevant_documents(augmented_query)
                         context = split_image_text_types(docs)
-                        messages = img_prompt_func({"context": context, "question": prompt})
+
+                        
+                        messages = img_prompt_func(
+                            {"context": context, "question": prompt},
+                            chat_history=chat_history
+                        )
                         response = chat.invoke(messages).content
                         st.markdown(response)
                         st.session_state.messages.append({"role": "assistant", "content": response})
@@ -353,8 +387,9 @@ def main():
             st.session_state.messages = []
             st.session_state.pop("processed_file", None)
             if "retriever" in st.session_state:
-                del st.session_state.retriever
+              del st.session_state.retriever
             st.rerun()
+
 
 if __name__ == "__main__":
     main()
